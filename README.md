@@ -1,101 +1,71 @@
-# Tracking Everything Everywhere All at Once
+# Data processing
 
-PyTorch Implementation for paper [Tracking Everything Everywhere All at Once]((https://omnimotion.github.io/)), ICCV 2023.
+This README file contains instructions to compute and process RAFT optical flows for optimizing OmniMotion.
 
-[Qianqian Wang](https://www.cs.cornell.edu/~qqw/) <sup>1,2</sup>,
-[Yen-Yu Chang](https://yuyuchang.github.io/) <sup>1</sup>,
-[Ruojin Cai](https://www.cs.cornell.edu/~ruojin/) <sup>1</sup>,
-[Zhengqi Li](https://zhengqili.github.io/) <sup>2</sup>,
-[Bharath Hariharan](https://www.cs.cornell.edu/~bharathh/) <sup>1</sup>,
-[Aleksander Holynski](https://holynski.org/) <sup>2,3</sup>,
-[Noah Snavely](https://www.cs.cornell.edu/~snavely/) <sup>1,2</sup>
-<br>
-<sup>1</sup>Cornell University,  <sup>2</sup>Google Research,  <sup>3</sup>UC Berkeley
-
-#### [Project Page](https://omnimotion.github.io/) | [Paper](https://arxiv.org/pdf/2306.05422.pdf) | [Video](https://www.youtube.com/watch?v=KHoAG3gA024)
-## Installation
-The code is tested with `python=3.8` and `torch=1.10.0+cu111` on an A100 GPU.
+## Data format
+The input video data should be organized in the following format:
 ```
-git clone --recurse-submodules https://github.com/qianqianwang68/omnimotion/
-cd omnimotion/
-conda create -n omnimotion python=3.8
+├──sequence_name/
+    ├──color/
+        ├──00000.jpg
+        ├──00001.jpg
+        .....
+    ├──mask/ (optional; only used for visualization purposes)
+        ├──00000.png
+        ├──00001.png
+        ..... 
+```
+If you want to run on [DAVIS](https://davischallenge.org/index.html) video sequences, you can run `python get_davis.py <out_dir>` 
+which will download the original dataset and organize it in our format for processing. Alternatively, you can 
+download some of our processed sequences [here](https://omnimotion.cs.cornell.edu/dataset/) to skip processing and directly start training.
+
+If you want to train on your own video sequence, we recommend you to start with
+shorter sequences (< 60 frames) and lower resolution (<= 480p) to manage computational cost. 
+You may use `ffmpeg` to extract frames from the video.
+
+
+## Preparation
+The command below moves files to the correct locations and download pretrained models (this only needs to be run once).
+```
+cd preprocessing/  
+
+mv exhaustive_raft.py filter_raft.py chain_raft.py RAFT/;
+cd RAFT; ./download_models.sh; cd ../
+
+mv extract_dino_features.py dino/
+```
+
+## Computing and processing flow
+
+Run the following command to process the input video sequence. Please use absolute path for the sequence directory.
+```
 conda activate omnimotion
-pip install torch==1.10.0+cu111 torchvision==0.11.0+cu111 torchaudio==0.10.0 -f https://download.pytorch.org/whl/torch_stable.html
-pip install matplotlib tensorboard scipy opencv-python tqdm tensorboardX configargparse ipdb kornia imageio[ffmpeg]
+python main_processing.py --data_dir <sequence directory> --chain
+```
+The processing contains several steps:
+- computing all pairwise optical flows using `exhaustive_raft.py`
+- computing dino features for each frame using `extract_dino_features.py`
+- filtering flows using cycle consistency and appearance consistency check using`filter_raft.py`
+- (optional) chaining only cycle consistent flows to create denser correspondences using `chain_raft.py`. 
+  We found this to be helpful for handling sequences with rapid motion and large displacements. 
+  For simple motion, this may be skipped by omitting `--chain` to save processing time. 
+
+After processing the folder should look like the following:
+```
+├──sequence_name/
+    ├──color/
+    ├──mask/ (optional; only used for visualization purposes)
+    ├──count_maps/
+    ├──features/
+    ├──raft_exhaustive/
+    ├──raft_masks/
+    ├──flow_stats.json
 ```
 
-## Training
-1. Please refer to the [preprocessing instructions](preprocessing/README.md) for preparing input data 
-   for training OmniMotion. We also provide some processed [data](https://omnimotion.cs.cornell.edu/dataset/)
-   that you can download, unzip and directly train on. (Note that depending on the network speed, 
-   it may be faster to run the processing script locally than downloading the processed data).
-   
-2.  With processed input data, run the following command to start training:
-    ```
-    python train.py --config configs/default.txt --data_dir {sequence_directory}
-    ```
-    You can view visualizations on tensorboard by running `tensorboard --logdir logs/`. 
-    By default, the script trains 100k iterations which takes 8~9h on an A100 GPU and 12-13h on RTX4090.
-
-If you want to skip the optimization and see what the results/formats look like, we provide the weights
-for a few sequences [here](https://drive.google.com/drive/folders/16ekLy-4LTkYAavYrWaKk2qUpJ9TyMXlO?usp=sharing).
-You can use `viz.py` to visualize the correspondences produced by the models. Please refer to the next section for more details.
-
-## Visualization
-The training pipeline generates visualizations (correspondences, pseudo-depth maps, etc) every certain number of steps (saved in `args.out_dir/vis`). 
-You can also visualize grid points / trails after training by running: 
-```
-python viz.py --config configs/default.txt --data_dir {sequence_directory}
-```
-Make sure `expname` and `data_dir` are correctly specified, so that the
-model and data can be loaded. By specifying `expname`, the latest checkpoints that match that `expname` 
-will be loaded. Alternatively, you can specify `ckpt_path` to select a particular checkpoint.
-
-To generate the motion trail visualization, foreground/background segmentation mask is required. 
-For DAVIS videos one can just use the mask annotations provided by the dataset. For custom videos that don't come with
-foreground segmentation masks, you can use [remove.bg](https://www.remove.bg/) to remove the background 
-for the query frame, download the masked image and set `foreground_mask_path` to its path. 
-[Here](https://omnimotion.cs.cornell.edu/dataset/mask_0.png) is an example of the masked image for the first frame
-of the `butterfly` sequence. 
-```
-python viz.py --config configs/default.txt --data_dir {sequence_directory} --foreground_mask_path {mask_file_path}
-```
-
-If you download the provided model weights for a sequence from [here](https://drive.google.com/drive/folders/16ekLy-4LTkYAavYrWaKk2qUpJ9TyMXlO?usp=sharing),
-you can visualize the correspondences by running the `viz.py` script and 
-setting `data_dir` to the unzipped directory, `ckpt_path` to the path for
-`model_100000.pth` in the directory, and optionally 
-`foreground_mask_path`as the path to `mask_0.png` 
-(only required for non-DAVIS sequences `butterfly`, `kangaroo`, and `swing_tire` if you want to visualize their motion trails).
-
-## Troubleshooting
-
-- The training code utilizes approximately 22GB of CUDA memory. If you encounter CUDA out of memory errors, 
-  you may consider reducing the number of sampled points `num_pts` and the chunk size `chunk_size`.
-- Due to the highly non-convex nature of the underlying optimization problem, we observe that the optimization process 
-  can be sensitive to initialization for certain difficult videos. If you notice significant inaccuracies in surface
-  orderings (by examining the pseudo depth maps) persist after 40k steps, 
-  it is very likely that training won't recover from that. You may consider restarting the training with a 
-  different `loader_seed` to change the initialization. 
-  If surfaces are incorrectly put at the nearest depth planes (which are not supposed to be the closest), 
-  we found using `mask_near` to disable near samples in the beginning of the training could help in some cases.  
-- Another common failure we noticed is that instead of creating a single object in the canonical space with
-  correct motion, the method creates duplicated objects in the canonical space with short-ranged motion for each.
-  This has to do with both that the input correspondences on the object being sparse and short-ranged, 
-  and the optimization being stuck at local minima. This issue may be alleviated with better and longer-range input correspondences 
-  such as from [TAPIR](https://deepmind-tapir.github.io/) and [CoTracker](https://co-tracker.github.io/). 
-  Alternatively, you may consider adjusting `loader_seed` or the learning rates.
-
-
-## Citation
-```
-@article{wang2023omnimotion,
-    title   = {Tracking Everything Everywhere All at Once},
-    author  = {Wang, Qianqian and Chang, Yen-Yu and Cai, Ruojin and Li, Zhengqi and Hariharan, Bharath and Holynski, Aleksander and Snavely, Noah},
-    journal = {ICCV},
-    year    = {2023}
-}
-```
-
-
-
+## Discussion
+This processing pipeline is designed to filter and process RAFT optical flow for training our method. 
+Our method can also take as input correspondences from other methods, e.g., [TAPIR](https://deepmind-tapir.github.io/) and
+[CoTracker](https://co-tracker.github.io/). 
+If you want to use different correspondences as input supervision, note that their error patterns might be different from
+those of RAFT optical flow, and you may need to devise new filtering methods that are effective for the specific correspondences
+you are working with.
